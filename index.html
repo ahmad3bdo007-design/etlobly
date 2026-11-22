@@ -388,8 +388,8 @@ window.addEventListener('hashchange',hashCmd);hashCmd();
 /* ===== v5: ربط العميل بالمندوب (طلب → قبول → توصيل) ===== */
 const ST=[['في انتظار قبول مندوب','بندوّر لك على مندوب قريب'],['المندوب قبل طلبك','المندوب في طريقه للمتجر'],['تم استلام الطلب من المتجر','المندوب خد طلبك'],['المندوب في الطريق إليك','قرّب يوصلك'],['تم التسليم','بالهنا والشفا 🎉']];
 const COURIER_IDLE=courierHome.innerHTML;
-const loadOrders=()=>{activeOrders=ld('etlobly_active_orders',[])};
-const saveOrders=()=>sv('etlobly_active_orders',activeOrders);
+const loadOrders=()=>{};
+const saveOrders=()=>{if(window.__sync)window.__sync()};
 /* طلبات قديمة من نسخ التجربة السابقة تتحول لـ "تم التسليم" عشان ما تعلقش */
 activeOrders.forEach(o=>{if(!o.v){o.v=5;o.stage=4}});saveOrders();
 const byId=id=>activeOrders.find(x=>x.id===id);
@@ -669,7 +669,7 @@ setTimeout(()=>{if(!window.__authReady)document.getElementById('authMsg').textCo
 <script type="module">
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {getAuth,RecaptchaVerifier,signInWithPhoneNumber,onAuthStateChanged,signOut} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import {getFirestore,doc,getDoc,setDoc,serverTimestamp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {getFirestore,doc,getDoc,setDoc,serverTimestamp,collection,query,where,onSnapshot,writeBatch,updateDoc,deleteDoc,runTransaction} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 const app=initializeApp({apiKey:"AIzaSyD4VGg4-vMivTNWy05OD8npSDJV57l0TK4",authDomain:"etlobly-18ca1.firebaseapp.com",projectId:"etlobly-18ca1",storageBucket:"etlobly-18ca1.firebasestorage.app",messagingSenderId:"329992721589",appId:"1:329992721589:web:5cc888dc802aafa89d5afc"});
 const auth=getAuth(app);auth.languageCode='ar';const db=getFirestore(app);
 const $=id=>document.getElementById(id),msg=t=>$('authMsg').textContent=t;let conf=null,ver=null;
@@ -677,10 +677,28 @@ const e164=v=>{v=v.replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d)).repl
 $('sendCode').onclick=async()=>{const p=e164($('authPhone').value);if(!p)return msg('رقم التليفون غير صحيح');msg('جاري إرسال الكود…');try{ver=ver||new RecaptchaVerifier(auth,'recap',{size:'invisible'});conf=await signInWithPhoneNumber(auth,p,ver);$('stepPhone').hidden=true;$('stepCode').hidden=false;msg('')}catch(e){msg('تعذّر الإرسال ('+(e.code||'خطأ')+')');try{ver.clear()}catch(_){}ver=null}};
 $('verifyCode').onclick=async()=>{try{await conf.confirm($('authCode').value.trim());msg('')}catch(e){msg('الكود غير صحيح')}};
 window.__signOut=()=>signOut(auth);
-window.__onRole=async r=>{if(!window.__uid||window.__hasDoc||isOwner())return;try{await setDoc(doc(db,'users',window.__uid),{role:r,phone:window.__phone,createdAt:serverTimestamp()});window.__hasDoc=true}catch(e){notify('تعذّر حفظ نوع الحساب')}};
-onAuthStateChanged(auth,async u=>{window.__authReady=true;if(!u){window.__uid=null;window.__hasDoc=false;$('stepPhone').hidden=false;$('stepCode').hidden=true;msg('');$('authScreen').hidden=false;return}
-window.__uid=u.uid;window.__phone=u.phoneNumber;
-try{const s=await getDoc(doc(db,'users',u.uid));if(s.exists()){const d=s.data();window.__hasDoc=true;if(d.isOwner===true)localStorage.setItem('etlobly_owner','1');else localStorage.removeItem('etlobly_owner');localStorage.setItem('etlobly_role',d.role);setRole(d.role)}else{localStorage.removeItem('etlobly_owner');window.__hasDoc=false}}catch(e){msg('تعذّر قراءة حسابك');return}
+window.__onRole=async r=>{if(!window.__uid)return;listen(r);if(window.__hasDoc||isOwner())return;try{await setDoc(doc(db,'users',window.__uid),{role:r,phone:window.__phone,createdAt:serverTimestamp()});window.__hasDoc=true}catch(e){notify('تعذّر حفظ نوع الحساب')}};
+
+/* ===== مزامنة الطلبات مع Firestore ===== */
+let unsubs=[],listenRole=null;const shadow=new Map();
+const sig=o=>JSON.stringify([o.stage,o.paidWith||null,o.recvAmt??null,o.wallet??null,o.done||null,!!o.received,o.courierUid||null]);
+const pub=o=>({title:o.title,icon:o.icon||'',from:o.from,total:o.total,fee:o.fee||15,pay:o.pay,count:o.items.reduce((a,i)=>a+i.q,0),stage:o.stage,status:o.status||'',custUid:o.custUid,courierUid:null,sLat:o.sLat??null,sLng:o.sLng??null,t:o.t,received:false});
+const toLocal=(id,d,old)=>{const o={...(old||{}),id,v:5,title:d.title,icon:d.icon,from:d.from,total:d.total,fee:d.fee,pay:d.pay,stage:d.stage,status:d.status,t:d.t,received:!!d.received,paidWith:d.paidWith,recvAmt:d.recvAmt,wallet:d.wallet,done:d.done,custUid:d.custUid,courierUid:d.courierUid||null,courier:d.courierUid?'مندوب':undefined,sLat:d.sLat,sLng:d.sLng};if(!o.priv){o.items=[{q:d.count,n:'',p:0}];o.to=o.to||'';o.note=o.note||'';o.dist=null}return o};
+function refreshUI(){if(role==='عميل')activeOrders.forEach(o=>{if(lastSeen[o.id]!==undefined&&o.stage>lastSeen[o.id])notify('#'+o.id+': '+ST[o.stage][0])});activeOrders.forEach(o=>lastSeen[o.id]=o.stage);if(!sub.hidden&&/^(تتبع:|طلباتي|مهمة:|طلبات المندوب|أرباحي|طلبات اليوم)/.test(curPage))rerender();if(!courierHome.hidden)renderCourier();homeOrder();navBadges()}
+async function fetchPriv(o){if(o.priv||!(o.custUid===window.__uid||o.courierUid===window.__uid))return;try{const s=await getDoc(doc(db,'orders',o.id,'private','d'));const x=activeOrders.find(y=>y.id===o.id);if(s.exists()&&x){Object.assign(x,s.data(),{priv:true});refreshUI()}}catch(e){}}
+function onSnap(snap){snap.docChanges().forEach(ch=>{const id=ch.doc.id;const i=activeOrders.findIndex(o=>o.id===id);if(ch.type==='removed'){const c=i>=0?activeOrders[i]:null;if(c&&c.courierUid&&c.courierUid===window.__uid)return;if(i>=0)activeOrders.splice(i,1);shadow.delete(id);return}const o=toLocal(id,ch.doc.data(),i>=0?activeOrders[i]:null);if(i>=0)activeOrders[i]=o;else activeOrders.push(o);shadow.set(id,sig(o));fetchPriv(o)});refreshUI()}
+function listen(r){if(!window.__uid||listenRole===r)return;unsubs.forEach(f=>f());unsubs=[];activeOrders.length=0;shadow.clear();listenRole=r;const oc=collection(db,'orders'),er=e=>{notify('تعذّر تحميل الطلبات');console.error(e)};if(r==='عميل')unsubs.push(onSnapshot(query(oc,where('custUid','==',window.__uid)),onSnap,er));else{unsubs.push(onSnapshot(query(oc,where('stage','==',0)),onSnap,er));unsubs.push(onSnapshot(query(oc,where('courierUid','==',window.__uid)),onSnap,er))}refreshUI()}
+let syncing=false,again=false;
+window.__sync=async()=>{if(!window.__uid)return;if(syncing){again=true;return}syncing=true;try{for(const o of [...activeOrders]){const sh=shadow.get(o.id);
+if(sh===undefined){if(o.custUid||role==='مندوب')continue;o.custUid=window.__uid;const b=writeBatch(db);b.set(doc(db,'orders',o.id),{...pub(o),created:serverTimestamp()});b.set(doc(db,'orders',o.id,'private','d'),{to:o.to,note:o.note||'',items:o.items,cLat:o.cLat??null,cLng:o.cLng??null,cGps:!!o.cGps,dist:o.dist??null});o.priv=true;shadow.set(o.id,sig(o));try{await b.commit()}catch(e){shadow.delete(o.id);activeOrders.splice(activeOrders.indexOf(o),1);notify('تعذّر إرسال الطلب');refreshUI()}continue}
+const now=sig(o);if(now===sh)continue;const ref=doc(db,'orders',o.id);
+try{if(role==='مندوب'||(isOwner()&&role!=='عميل')){if(JSON.parse(sh)[0]===0&&o.stage===1){await runTransaction(db,async t=>{const sn=await t.get(ref);if(!sn.exists()||sn.data().stage!==0||sn.data().courierUid)throw new Error('taken');t.update(ref,{stage:1,status:o.status||'',courierUid:window.__uid})});o.courierUid=window.__uid;o.courier='مندوب'}else{const u={stage:o.stage,status:o.status||''};if(o.paidWith)u.paidWith=o.paidWith;if(o.recvAmt!=null)u.recvAmt=o.recvAmt;if(o.wallet!=null)u.wallet=o.wallet;if(o.done)u.done=o.done;await updateDoc(ref,u)}}
+else if(o.received){await updateDoc(ref,{received:true})}
+shadow.set(o.id,sig(o))}catch(e){if(String(e.message).includes('taken')){notify('الطلب ده اتاخد من مندوب تاني');o.stage=0;o.courier=undefined;o.courierUid=null;shadow.set(o.id,sig(o))}else{notify('تعذّرت المزامنة');console.error(e)}refreshUI()}}
+for(const id of [...shadow.keys()]){if(!activeOrders.some(o=>o.id===id)&&role==='عميل'){shadow.delete(id);try{await deleteDoc(doc(db,'orders',id))}catch(e){}}}}finally{syncing=false;if(again){again=false;window.__sync()}}};
+onAuthStateChanged(auth,async u=>{window.__authReady=true;if(!u){unsubs.forEach(f=>f());unsubs=[];listenRole=null;shadow.clear();activeOrders.length=0;window.__uid=null;window.__hasDoc=false;$('stepPhone').hidden=false;$('stepCode').hidden=true;msg('');$('authScreen').hidden=false;return}
+window.__uid=u.uid;window.__phone=u.phoneNumber;activeOrders.length=0;localStorage.removeItem('etlobly_active_orders');
+try{const s=await getDoc(doc(db,'users',u.uid));if(s.exists()){const d=s.data();window.__hasDoc=true;if(d.isOwner===true)localStorage.setItem('etlobly_owner','1');else localStorage.removeItem('etlobly_owner');localStorage.setItem('etlobly_role',d.role);setRole(d.role);listen(d.role)}else{localStorage.removeItem('etlobly_owner');window.__hasDoc=false}}catch(e){msg('تعذّر قراءة حسابك');return}
 ownerBarSync();$('authScreen').hidden=true});
 </script>
 </body></html>
