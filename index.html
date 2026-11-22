@@ -661,6 +661,11 @@ if(role==='مندوب'){courierHome.innerHTML='';renderCourier()}
 <p id="authMsg" style="color:#ff6900;font:700 13px 'Cairo';min-height:20px;margin-top:12px">جاري التحميل…</p>
 <div id="recap"></div></div></div>
 <script>
+window.showErr=function(t){var b=document.getElementById('errBanner');if(!b){b=document.createElement('div');b.id='errBanner';b.style.cssText='position:fixed;bottom:0;left:0;right:0;z-index:9000;background:#16181d;color:#fff;font:600 12px Arial,sans-serif;padding:8px 12px;direction:ltr;text-align:left;max-height:26vh;overflow:auto';b.onclick=function(){b.remove()};document.body.appendChild(b)}b.textContent='⚠ '+t+'  (اضغط للإغلاق)'};
+window.addEventListener('error',function(e){showErr(e.message)});
+window.addEventListener('unhandledrejection',function(e){showErr((e.reason&&(e.reason.code||e.reason.message))||'خطأ')});
+</script>
+<script>
 const _srA=setRole;setRole=function(r){_srA(r);if(window.__onRole)window.__onRole(r)};
 const _loA=logout;logout=function(){_loA();if(window.__signOut)window.__signOut()};
 openOwner=function(){};
@@ -677,7 +682,7 @@ const e164=v=>{v=v.replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d)).repl
 $('sendCode').onclick=async()=>{const p=e164($('authPhone').value);if(!p)return msg('رقم التليفون غير صحيح');msg('جاري إرسال الكود…');try{ver=ver||new RecaptchaVerifier(auth,'recap',{size:'invisible'});conf=await signInWithPhoneNumber(auth,p,ver);$('stepPhone').hidden=true;$('stepCode').hidden=false;msg('')}catch(e){msg('تعذّر الإرسال ('+(e.code||'خطأ')+')');try{ver.clear()}catch(_){}ver=null}};
 $('verifyCode').onclick=async()=>{try{await conf.confirm($('authCode').value.trim());msg('')}catch(e){msg('الكود غير صحيح')}};
 window.__signOut=()=>signOut(auth);
-window.__onRole=async r=>{if(!window.__uid)return;listen(r);if(window.__hasDoc||isOwner())return;try{await setDoc(doc(db,'users',window.__uid),{role:r,phone:window.__phone,createdAt:serverTimestamp()});window.__hasDoc=true}catch(e){notify('تعذّر حفظ نوع الحساب')}};
+window.__onRole=async r=>{if(!window.__uid)return;try{if(!window.__hasDoc&&!isOwner()){await setDoc(doc(db,'users',window.__uid),{role:r,phone:window.__phone,createdAt:serverTimestamp()});window.__hasDoc=true}}catch(e){notify('تعذّر حفظ نوع الحساب');showErr('حفظ الحساب: '+(e.code||e.message))}listen(r)};
 
 /* ===== مزامنة الطلبات مع Firestore ===== */
 let unsubs=[],listenRole=null;const shadow=new Map();
@@ -687,7 +692,7 @@ const toLocal=(id,d,old)=>{const o={...(old||{}),id,v:5,title:d.title,icon:d.ico
 function refreshUI(){if(role==='عميل')activeOrders.forEach(o=>{if(lastSeen[o.id]!==undefined&&o.stage>lastSeen[o.id])notify('#'+o.id+': '+ST[o.stage][0])});activeOrders.forEach(o=>lastSeen[o.id]=o.stage);if(!sub.hidden&&/^(تتبع:|طلباتي|مهمة:|طلبات المندوب|أرباحي|طلبات اليوم)/.test(curPage))rerender();if(!courierHome.hidden)renderCourier();homeOrder();navBadges()}
 async function fetchPriv(o){if(o.priv||!(o.custUid===window.__uid||o.courierUid===window.__uid))return;try{const s=await getDoc(doc(db,'orders',o.id,'private','d'));const x=activeOrders.find(y=>y.id===o.id);if(s.exists()&&x){Object.assign(x,s.data(),{priv:true});refreshUI()}}catch(e){}}
 function onSnap(snap){snap.docChanges().forEach(ch=>{const id=ch.doc.id;const i=activeOrders.findIndex(o=>o.id===id);if(ch.type==='removed'){const c=i>=0?activeOrders[i]:null;if(c&&c.courierUid&&c.courierUid===window.__uid)return;if(i>=0)activeOrders.splice(i,1);shadow.delete(id);return}const o=toLocal(id,ch.doc.data(),i>=0?activeOrders[i]:null);if(i>=0)activeOrders[i]=o;else activeOrders.push(o);shadow.set(id,sig(o));fetchPriv(o)});refreshUI()}
-function listen(r){if(!window.__uid||listenRole===r)return;unsubs.forEach(f=>f());unsubs=[];activeOrders.length=0;shadow.clear();listenRole=r;const oc=collection(db,'orders'),er=e=>{notify('تعذّر تحميل الطلبات');console.error(e)};if(r==='عميل')unsubs.push(onSnapshot(query(oc,where('custUid','==',window.__uid)),onSnap,er));else{unsubs.push(onSnapshot(query(oc,where('stage','==',0)),onSnap,er));unsubs.push(onSnapshot(query(oc,where('courierUid','==',window.__uid)),onSnap,er))}refreshUI()}
+function listen(r){if(!window.__uid||listenRole===r)return;unsubs.forEach(f=>f());unsubs=[];activeOrders.length=0;shadow.clear();listenRole=r;const oc=collection(db,'orders'),er=e=>{showErr('تحميل الطلبات: '+(e.code||e.message));if(listenRole===r){listenRole=null;setTimeout(()=>listen(r),3000)}};if(r==='عميل')unsubs.push(onSnapshot(query(oc,where('custUid','==',window.__uid)),onSnap,er));else{unsubs.push(onSnapshot(query(oc,where('stage','==',0)),onSnap,er));unsubs.push(onSnapshot(query(oc,where('courierUid','==',window.__uid)),onSnap,er))}refreshUI()}
 let syncing=false,again=false;
 window.__sync=async()=>{if(!window.__uid)return;if(syncing){again=true;return}syncing=true;try{for(const o of [...activeOrders]){const sh=shadow.get(o.id);
 if(sh===undefined){if(o.custUid||role==='مندوب')continue;o.custUid=window.__uid;const b=writeBatch(db);b.set(doc(db,'orders',o.id),{...pub(o),created:serverTimestamp()});b.set(doc(db,'orders',o.id,'private','d'),{to:o.to,note:o.note||'',items:o.items,cLat:o.cLat??null,cLng:o.cLng??null,cGps:!!o.cGps,dist:o.dist??null});o.priv=true;shadow.set(o.id,sig(o));try{await b.commit()}catch(e){shadow.delete(o.id);activeOrders.splice(activeOrders.indexOf(o),1);notify('تعذّر إرسال الطلب');refreshUI()}continue}
